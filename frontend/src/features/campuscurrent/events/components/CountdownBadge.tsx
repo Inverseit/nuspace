@@ -114,7 +114,7 @@ export function CountdownBadge({ eventDateIso, durationMinutes, className = "" }
     : formatRemaining(remainingMs);
 
   return (
-    <Badge className={`${tone} ${className} ${animate ? 'animate-pulse' : ''}`}>
+    <Badge variant="outline" className={`${tone} ${className} ${animate ? 'animate-pulse' : ''}`}>
       {timeText}
     </Badge>
   );
