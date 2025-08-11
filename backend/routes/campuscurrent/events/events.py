@@ -1,7 +1,11 @@
 from datetime import date
 from typing import Annotated, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+import re
+from urllib.parse import urljoin
+import html as html_lib
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, Response
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -525,14 +529,14 @@ async def delete_event(
     return status.HTTP_204_NO_CONTENT
 
 
-@router.get("/events/{event_id}", response_model=schemas.EventResponse)
+@router.get("/events/{event_id}")
 async def get_event(
     event_id: int,
     request: Request,
     user: Annotated[tuple[dict, dict], Depends(get_optional_principals)],
     db_session: AsyncSession = Depends(get_db_session),
     event: Event = Depends(deps.event_exists_or_404),
-) -> schemas.EventResponse:
+):
     """
     Retrieves a single event by its unique ID.
 
@@ -595,7 +599,7 @@ async def get_event(
         )
     )
 
-    return response_builder.build_schema(
+    event_response = response_builder.build_schema(
         schemas.EventResponse,
         schemas.EventResponse.model_validate(event),
         creator=schemas.ShortUserResponse.model_validate(event.creator),
@@ -611,3 +615,175 @@ async def get_event(
         ),
         permissions=utils.get_event_permissions(event, user),
     )
+
+    # Determine if we should serve crawler-friendly HTML
+    accept_header = request.headers.get("accept", "") or ""
+    user_agent = request.headers.get("user-agent", "") or ""
+    wants_html = "text/html" in accept_header.lower()
+    is_crawler = any(
+        agent in user_agent.lower()
+        for agent in [
+            "telegrambot",
+            "facebookexternalhit",
+            "twitterbot",
+            "linkedinbot",
+            "slackbot",
+            "discordbot",
+            "vkshare",
+            "whatsapp",
+            "bot",
+        ]
+    )
+
+    if wants_html or is_crawler:
+        # Get the first media URL for OG image
+        og_image_url = None
+        if media_results and media_results[0]:
+            og_image_url = media_results[0][0].url if media_results[0] else None
+
+        # Ensure absolute URLs for OG
+        request_base = str(request.base_url)
+        absolute_url = str(request.url)
+        if og_image_url and not og_image_url.startswith("http"):
+            og_image_url = urljoin(request_base, og_image_url)
+
+        # Build safe text
+        def strip_tags(text: str) -> str:
+            return re.sub(r"<[^>]+>", " ", text or "").strip()
+
+        safe_title = html_lib.escape(strip_tags(event.name))
+        raw_desc = strip_tags(event.description)
+        truncated_desc = (raw_desc[:297] + "...") if len(raw_desc) > 300 else raw_desc
+        safe_desc = html_lib.escape(truncated_desc)
+        site_name = event.community.name if event.community else "NU Events"
+        safe_site_name = html_lib.escape(strip_tags(site_name))
+        
+        # Build HTML with Open Graph meta tags
+        html_content = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{safe_title}</title>
+    
+    <!-- Open Graph Meta Tags -->
+    <meta property="og:title" content="{safe_title}">
+    <meta property="og:description" content="{safe_desc}">
+    <meta property="og:type" content="event">
+    <meta property="og:url" content="{absolute_url}">
+    {f'<meta property="og:image" content="{og_image_url}">' if og_image_url else ''}
+    {f'<meta property="og:image:secure_url" content="{og_image_url}">' if og_image_url and og_image_url.startswith('https') else ''}
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <link rel="canonical" href="{absolute_url}" />
+    
+    <!-- Twitter Card Meta Tags -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="{safe_title}">
+    <meta name="twitter:description" content="{safe_desc}">
+    {f'<meta name="twitter:image" content="{og_image_url}">' if og_image_url else ''}
+    
+    <!-- Additional Meta Tags -->
+    <meta name="description" content="{safe_desc}">
+    <meta property="og:site_name" content="{safe_site_name}">
+    
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }}
+        .container {{
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }}
+        .event-title {{
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 20px;
+        }}
+        .event-description {{
+            font-size: 1.2em;
+            line-height: 1.6;
+            color: #666;
+            margin-bottom: 30px;
+        }}
+        .event-meta {{
+            display: flex;
+            gap: 20px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }}
+        .meta-item {{
+            background: #f8f9fa;
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-size: 0.9em;
+            color: #495057;
+        }}
+        .event-image {{
+            width: 100%;
+            max-width: 600px;
+            height: auto;
+            border-radius: 8px;
+            margin: 20px 0;
+        }}
+        .community-info {{
+            background: #e9ecef;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }}
+        .community-name {{
+            font-weight: bold;
+            color: #495057;
+            margin-bottom: 5px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="event-title">{safe_title}</h1>
+        
+        <div class="event-meta">
+            <div class="meta-item">
+                <strong>Date:</strong> {event.event_datetime.strftime('%B %d, %Y at %I:%M %p') if getattr(event, 'event_datetime', None) else 'TBD'}
+            </div>
+            <div class="meta-item">
+                <strong>Type:</strong> {event.type.value.title() if getattr(event, 'type', None) else 'N/A'}
+            </div>
+            <div class="meta-item">
+                <strong>Status:</strong> {event.status.value.title() if getattr(event, 'status', None) else 'N/A'}
+            </div>
+        </div>
+        
+        <div class="event-description">{safe_desc}</div>
+        
+        {f'<img src="{og_image_url}" alt="{event.name}" class="event-image">' if og_image_url else ''}
+        
+        {f'''
+        <div class="community-info">
+            <div class="community-name">Organized by: {event.community.name}</div>
+            {f'<div>{event.community.description}</div>' if event.community.description else ''}
+        </div>
+        ''' if event.community else ''}
+        
+        <p style="margin-top: 30px; text-align: center; color: #6c757d;">
+            View full event details and register at <a href="{request.url}">NU Events</a>
+        </p>
+    </div>
+</body>
+</html>
+        """
+        
+        return Response(content=html_content, media_type="text/html")
+    else:
+        # Return JSON response
+        return event_response
